@@ -1,25 +1,27 @@
 name: Test
 on:
-  push: 
+  push:
     branches:
       - main
+  pull_request:
 
-jobs: 
-  cargo-tests:
+jobs:
+  checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      - uses: Swatinem/rust-cache@v2.7.2
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --all --all-features
-

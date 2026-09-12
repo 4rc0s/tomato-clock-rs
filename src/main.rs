@@ -1,92 +1,75 @@
-use std::env;
-use std::io::{self, Write};
-use std::thread;
-use std::time::{Duration, Instant};
+mod cli;
+mod notify;
+mod progress;
+mod timer;
 
-const WORK_MINUTES: u64 = 25;
-const BREAK_MINUTES: u64 = 5;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() == 1 {
-        println!("🍅 tomato {WORK_MINUTES} minutes. Ctrl+C to exit");
-        tomato(WORK_MINUTES, "It is time to take a break");
-        println!("🛀 break {BREAK_MINUTES} minutes. Ctrl+C to exit");
-        tomato(BREAK_MINUTES, "It is time to work");
-    } else {
-        match args.get(1).map(|s| s.as_str()) {
-            Some("-t") => {
-                let minutes = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(WORK_MINUTES);
-                println!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
-                tomato(minutes, "It is time to take a break");
+use anyhow::Context;
+use clap::Parser;
+
+use cli::{BREAK_MINUTES, Cli, Command, WORK_MINUTES};
+use timer::RunOptions;
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&interrupted);
+    // Only a warning if the handler can't be installed (e.g. in tests);
+    // default SIGINT termination still applies.
+    let _ = ctrlc::set_handler(move || {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    let no_notify = cli.no_notify;
+    let quiet = cli.quiet;
+
+    match cli.command {
+        None => {
+            println!("🍅 tomato {WORK_MINUTES} minutes. Ctrl+C to exit");
+            run_timer(
+                WORK_MINUTES,
+                "It is time to take a break",
+                no_notify,
+                quiet,
+                &interrupted,
+            )?;
+            if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(());
             }
-            Some("-b") => {
-                let minutes = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(BREAK_MINUTES);
-                println!("🛀 break {minutes} minutes. Ctrl+C to exit");
-                tomato(minutes, "It is time to work");
-            }
-            Some("-h") | None => help(),
-            Some("-n") => {
-                notify("hello world");
-            }
-            _ => help(),
+            println!("🛀 break {BREAK_MINUTES} minutes. Ctrl+C to exit");
+            run_timer(BREAK_MINUTES, "It is time to work", no_notify, quiet, &interrupted)?;
+        }
+        Some(Command::Work { minutes }) => {
+            println!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
+            run_timer(minutes, "It is time to take a break", no_notify, quiet, &interrupted)?;
+        }
+        Some(Command::Break { minutes }) => {
+            println!("🛀 break {minutes} minutes. Ctrl+C to exit");
+            run_timer(minutes, "It is time to work", no_notify, quiet, &interrupted)?;
         }
     }
+
+    Ok(())
 }
 
-fn tomato(minutes: u64, msg: &str) {
-    let start_time = Instant::now();
-    loop {
-        let diff_seconds = start_time.elapsed().as_secs();
-        let left_seconds = minutes * 60 - diff_seconds;
-        let seconds_slot = left_seconds % 60;
-        let countdown = format!("{}:{:0>2} ⏰", left_seconds / 60, seconds_slot);
-        let duration = std::cmp::min(minutes, 25);
-        progressbar(diff_seconds, minutes * 60, duration, &countdown);
-        if left_seconds <= 0 {
-            println!();
-            break;
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-    notify(msg);
-}
-
-fn progressbar(curr: u64, total: u64, duration: u64, extra: &str) {
-    let frac = curr as f64 / total as f64;
-    let filled = (frac * duration as f64).round() as u64;
-    print!("\r");
-    for _ in 0..filled {
-        print!("🍅");
-    }
-    for _ in 0..duration - filled {
-        print!("__");
-    }
-    print!(" [{:.0}%]", frac * 100.0);
-    print!(" {}", extra);
-    io::stdout().flush().unwrap();
-}
-
-fn notify(msg: &str) {
-    println!("{}", msg);
-    let _ = notify_rust::Notification::new()
-        .summary("🍅")
-        .body(msg)
-        //.icon("🍅")
-        .appname("tomato")
-        .show();
-}
-
-fn help() {
-    let appname = env::args().next().unwrap_or_else(|| String::from("tomato"));
-    println!("====== 🍅 Tomato Clock =======");
-    println!(
-        "{}         # start a {} minutes tomato clock + {} minutes break",
-        appname, WORK_MINUTES, BREAK_MINUTES
-    );
-    println!("{} -t      # start a {} minutes tomato clock", appname, WORK_MINUTES);
-    println!("{} -t <n>  # start a <n> minutes tomato clock", appname);
-    println!("{} -b      # take a {} minutes break", appname, BREAK_MINUTES);
-    println!("{} -b <n>  # take a <n> minutes break", appname);
-    println!("{} -h      # help", appname);
+fn run_timer(
+    minutes: u64,
+    message: &str,
+    no_notify: bool,
+    quiet: bool,
+    interrupted: &AtomicBool,
+) -> anyhow::Result<()> {
+    timer::run(
+        minutes,
+        &RunOptions {
+            message,
+            no_notify,
+            quiet,
+            interrupted,
+        },
+    )
+    .with_context(|| format!("failed to run {minutes}-minute timer"))
 }
