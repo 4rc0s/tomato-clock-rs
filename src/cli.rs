@@ -38,16 +38,29 @@ pub struct Cli {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Start a work session.
+    #[command(visible_aliases = ["w", "focus", "tomato"])]
     Work {
         /// Length of the work session in minutes.
         #[arg(default_value_t = WORK_MINUTES, value_parser = parse_minutes)]
         minutes: u64,
     },
     /// Take a break.
+    #[command(visible_aliases = ["b", "rest"])]
     Break {
         /// Length of the break in minutes.
         #[arg(default_value_t = BREAK_MINUTES, value_parser = parse_minutes)]
         minutes: u64,
+    },
+    /// Run a work session followed by a break (like bare `tomato`,
+    /// but with custom lengths).
+    #[command(visible_aliases = ["c", "full", "pomodoro"])]
+    Cycle {
+        /// Length of the work session in minutes.
+        #[arg(default_value_t = WORK_MINUTES, value_parser = parse_minutes)]
+        work_minutes: u64,
+        /// Length of the break in minutes.
+        #[arg(default_value_t = BREAK_MINUTES, value_parser = parse_minutes)]
+        break_minutes: u64,
     },
 }
 
@@ -80,5 +93,33 @@ mod tests {
         assert!(cli.no_notify);
         assert!(cli.quiet);
         assert_eq!(cli.command, Some(Command::Break { minutes: 3 }));
+    }
+
+    #[test]
+    fn parses_aliases() {
+        let cli = Cli::try_parse_from(["tomato", "w", "10"]).unwrap();
+        assert_eq!(cli.command, Some(Command::Work { minutes: 10 }));
+        let cli = Cli::try_parse_from(["tomato", "b"]).unwrap();
+        assert_eq!(cli.command, Some(Command::Break { minutes: BREAK_MINUTES }));
+    }
+
+    #[test]
+    fn parses_cycle_with_defaults() {
+        let cli = Cli::try_parse_from(["tomato", "cycle"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::Cycle {
+                work_minutes: WORK_MINUTES,
+                break_minutes: BREAK_MINUTES,
+            })
+        );
+        let cli = Cli::try_parse_from(["tomato", "cycle", "50", "10"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::Cycle {
+                work_minutes: 50,
+                break_minutes: 10,
+            })
+        );
     }
 }

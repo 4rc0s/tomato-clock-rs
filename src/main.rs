@@ -10,9 +10,20 @@ use anyhow::Context;
 use clap::Parser;
 
 use cli::{BREAK_MINUTES, Cli, Command, WORK_MINUTES};
-use timer::RunOptions;
+use timer::{Interrupted, RunOptions};
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        if e.downcast_ref::<Interrupted>().is_some() {
+            eprintln!("interrupted — timer stopped");
+            std::process::exit(130);
+        }
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -28,35 +39,72 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         None => {
-            println!("🍅 tomato {WORK_MINUTES} minutes. Ctrl+C to exit");
+            run_cycle(WORK_MINUTES, BREAK_MINUTES, no_notify, quiet, &interrupted)?;
+        }
+        Some(Command::Work { minutes }) => {
+            println!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
             run_timer(
-                WORK_MINUTES,
+                minutes,
+                "🍅 tomato",
                 "It is time to take a break",
                 no_notify,
                 quiet,
                 &interrupted,
             )?;
-            if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
-                return Ok(());
-            }
-            println!("🛀 break {BREAK_MINUTES} minutes. Ctrl+C to exit");
-            run_timer(BREAK_MINUTES, "It is time to work", no_notify, quiet, &interrupted)?;
-        }
-        Some(Command::Work { minutes }) => {
-            println!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
-            run_timer(minutes, "It is time to take a break", no_notify, quiet, &interrupted)?;
         }
         Some(Command::Break { minutes }) => {
             println!("🛀 break {minutes} minutes. Ctrl+C to exit");
-            run_timer(minutes, "It is time to work", no_notify, quiet, &interrupted)?;
+            run_timer(
+                minutes,
+                "🛀 break",
+                "It is time to work",
+                no_notify,
+                quiet,
+                &interrupted,
+            )?;
+        }
+        Some(Command::Cycle {
+            work_minutes,
+            break_minutes,
+        }) => {
+            run_cycle(work_minutes, break_minutes, no_notify, quiet, &interrupted)?;
         }
     }
 
     Ok(())
 }
 
+fn run_cycle(
+    work_minutes: u64,
+    break_minutes: u64,
+    no_notify: bool,
+    quiet: bool,
+    interrupted: &AtomicBool,
+) -> anyhow::Result<()> {
+    println!("🍅 tomato {work_minutes} minutes. Ctrl+C to exit");
+    run_timer(
+        work_minutes,
+        "🍅 tomato",
+        "It is time to take a break",
+        no_notify,
+        quiet,
+        interrupted,
+    )?;
+    println!("🛀 break {break_minutes} minutes. Ctrl+C to exit");
+    run_timer(
+        break_minutes,
+        "🛀 break",
+        "It is time to work",
+        no_notify,
+        quiet,
+        interrupted,
+    )?;
+    Ok(())
+}
+
 fn run_timer(
     minutes: u64,
+    label: &str,
     message: &str,
     no_notify: bool,
     quiet: bool,
@@ -66,6 +114,7 @@ fn run_timer(
         minutes,
         &RunOptions {
             message,
+            label,
             no_notify,
             quiet,
             interrupted,

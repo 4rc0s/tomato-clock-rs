@@ -33,11 +33,15 @@ tomato work           # 25 min work session
 tomato work 50        # 50 min work session (1-1440)
 tomato break          # 5 min break
 tomato break 15       # 15 min break
+tomato cycle 50 10    # 50 min work + 10 min break
 tomato --help         # full help
 tomato --version      # version
 
 tomato --no-notify work 25   # skip desktop notification
 tomato --quiet break 5       # no progress bar
+
+# Short aliases: w/work, b/break, c/cycle
+# Ctrl+C aborts with exit code 130 (standard SIGINT).
 ```
 
 ## Terminal Output

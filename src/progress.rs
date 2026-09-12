@@ -23,6 +23,12 @@ pub fn format_countdown(left_seconds: u64) -> String {
     format!("{}:{:0>2} ⏰", left_seconds / 60, left_seconds % 60)
 }
 
+/// Plain-text terminal/tab title for a session, e.g. `"23:04 ⏰ - 🍅 tomato"`.
+/// The caller wraps this in an OSC escape (`\x1b]0;{title}\x07`).
+pub fn session_title(label: &str, countdown: &str) -> String {
+    format!("{countdown} - {label}")
+}
+
 /// Render one full progress line (without `\r` or newline).
 /// Uses `🍅` for elapsed slots and `--` for remaining slots.
 pub fn render_bar(curr_secs: u64, total_secs: u64, width: u64, extra: &str) -> String {
@@ -67,6 +73,12 @@ mod tests {
         assert_eq!(format_countdown(1500), "25:00 ⏰");
         assert_eq!(format_countdown(599), "9:59 ⏰");
         assert_eq!(format_countdown(0), "0:00 ⏰");
+    }
+
+    #[test]
+    fn title_formatting() {
+        assert_eq!(session_title("🍅 tomato", "23:04 ⏰"), "23:04 ⏰ - 🍅 tomato");
+        assert_eq!(session_title("🛀 break", "0:00 ⏰"), "0:00 ⏰ - 🛀 break");
     }
 
     #[test]
