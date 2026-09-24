@@ -15,8 +15,15 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-ctrlc = { version = "3", features = ["termination"] }
 notify-rust = "4"
+
+# Signal handling: signal-hook reports which signal fired (for 128+N exit
+# codes); ctrlc covers Windows console events.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = { version = "3", features = ["termination"] }
 
 # Suspend-aware clock (CLOCK_BOOTTIME / Apple CLOCK_MONOTONIC) for the timer.
 [target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]

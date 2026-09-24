@@ -1,16 +1,37 @@
 use std::fmt;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::cli::validate_minutes;
 use crate::progress::{bar_width, format_countdown, render_bar, session_title};
 
-/// Returned when the run is aborted. `main` maps this to exit code 130
-/// (128 + SIGINT) so scripts can distinguish "aborted" from "done". The
-/// signal handler fires for SIGINT, SIGTERM and SIGHUP.
+/// Set by the signal handler to the number of the signal received
+/// (SIGINT, SIGTERM or SIGHUP); `0` means no signal yet.
+pub type InterruptFlag = AtomicUsize;
+
+/// The pending signal in `flag`, if any.
+pub fn pending_signal(flag: &InterruptFlag) -> Option<i32> {
+    match flag.load(Ordering::Relaxed) {
+        0 => None,
+        signal => Some(signal as i32),
+    }
+}
+
+/// Returned when the run is aborted by a signal. `main` exits with
+/// [`Interrupted::exit_code`] (128 + signal: 130 for Ctrl+C, 143 for
+/// SIGTERM, 129 for SIGHUP) so scripts can tell "aborted" from "done" and
+/// which signal did it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Interrupted;
+pub struct Interrupted {
+    pub signal: i32,
+}
+
+impl Interrupted {
+    pub fn exit_code(&self) -> i32 {
+        128 + self.signal
+    }
+}
 
 impl fmt::Display for Interrupted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -29,7 +50,7 @@ pub struct RunOptions<'a> {
     /// Whether ANSI/OSC escape sequences may be written (auto-detected
     /// from stdout being a TTY; `--quiet` still suppresses the bar).
     pub ansi: bool,
-    pub interrupted: &'a AtomicBool,
+    pub interrupted: &'a InterruptFlag,
 }
 
 /// Seconds remaining, saturating so scheduling stalls past the deadline
@@ -62,7 +83,7 @@ pub fn next_deadline(next_tick: Duration, now: Duration) -> Duration {
 pub trait Clock {
     fn now(&self) -> Duration;
     /// Sleep until `deadline`, returning `true` if interrupted.
-    fn sleep_until(&self, deadline: Duration, interrupted: &AtomicBool) -> bool;
+    fn sleep_until(&self, deadline: Duration, interrupted: &InterruptFlag) -> bool;
 }
 
 /// Production clock that keeps counting while the machine is suspended, so
@@ -109,9 +130,9 @@ impl Clock for RealClock {
     /// Sleeps in short slices, re-reading the clock each time, so Ctrl+C is
     /// noticed within ~50ms and a resume from suspend is noticed right away
     /// (`thread::sleep` itself doesn't count time spent suspended).
-    fn sleep_until(&self, deadline: Duration, interrupted: &AtomicBool) -> bool {
+    fn sleep_until(&self, deadline: Duration, interrupted: &InterruptFlag) -> bool {
         loop {
-            if interrupted.load(Ordering::Relaxed) {
+            if pending_signal(interrupted).is_some() {
                 return true;
             }
             let now = self.now();
@@ -123,18 +144,28 @@ impl Clock for RealClock {
     }
 }
 
-/// Hides the cursor while the progress bar is live, restoring the cursor
-/// and clearing the terminal title on drop (normal exit, interrupt, or
-/// panic). No-op when `active` is false (i.e. non-TTY or `--quiet`).
+/// Escape sequences written when the live display starts: hide the cursor
+/// and push the current window/icon title onto the terminal's title stack
+/// (XTWINOPS `CSI 22;0 t`).
+const TERMINAL_ENTER: &str = "\x1b[?25l\x1b[22;0t";
+
+/// Written on exit: show the cursor, clear the title we kept overwriting,
+/// then pop the saved title (`CSI 23;0 t`). Terminals without a title stack
+/// ignore the push/pop and are left with the cleared title instead of a
+/// stale countdown.
+const TERMINAL_EXIT: &str = "\x1b[?25h\x1b]0;\x07\x1b[23;0t";
+
+/// Hides the cursor and saves the terminal title while the progress bar is
+/// live, restoring both on drop (normal exit, interrupt, or panic). No-op
+/// when `active` is false (i.e. non-TTY or `--quiet`).
 struct TerminalGuard {
     active: bool,
 }
 
 impl TerminalGuard {
-    fn hide(active: bool) -> Self {
+    fn enter(active: bool) -> Self {
         if active {
-            print!("\x1b[?25l");
-            let _ = std::io::stdout().flush();
+            out!("{TERMINAL_ENTER}");
         }
         Self { active }
     }
@@ -143,17 +174,19 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
-            // Show cursor again and clear the OSC 0 title we kept overwriting.
-            print!("\x1b[?25h\x1b]0;\x07");
-            let _ = std::io::stdout().flush();
+            out!("{TERMINAL_EXIT}");
         }
     }
 }
 
 fn set_terminal_title(title: &str) {
     // OSC 0: set window/tab title. Harmless on terminals that ignore it.
-    print!("\x1b]0;{title}\x07");
+    out!("\x1b]0;{title}\x07");
 }
+
+/// Signal number used when a platform can't say which signal fired
+/// (Windows console events); also what the tests simulate.
+pub const SIGINT: i32 = 2;
 
 /// Run a single countdown timer with a tick-accurate loop.
 pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
@@ -168,17 +201,22 @@ pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) 
     let width = bar_width(minutes);
     let progress = show_progress(opts.quiet, opts.ansi);
 
-    let _terminal = TerminalGuard::hide(progress);
+    let _terminal = TerminalGuard::enter(progress);
 
     let start = clock.now();
     let mut next_tick = start + Duration::from_secs(1);
 
+    // End the bar's line and report which signal stopped us.
+    let interrupted = |signal: i32| {
+        if progress {
+            outln!();
+        }
+        Err(Interrupted { signal }.into())
+    };
+
     loop {
-        if opts.interrupted.load(Ordering::Relaxed) {
-            if progress {
-                println!();
-            }
-            return Err(Interrupted.into());
+        if let Some(signal) = pending_signal(opts.interrupted) {
+            return interrupted(signal);
         }
 
         let elapsed_secs = clock.now().saturating_sub(start).as_secs();
@@ -191,8 +229,7 @@ pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) 
             let line = render_bar(elapsed_secs, total_secs, width, &countdown);
             let title = session_title(opts.label, &countdown);
             set_terminal_title(&title);
-            print!("\r{line}   ");
-            std::io::stdout().flush()?;
+            out!("\r{line}   ");
         }
 
         if left_secs == 0 {
@@ -206,10 +243,8 @@ pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) 
         let deadline = next_deadline(next_tick, now);
         if deadline == next_tick {
             if clock.sleep_until(deadline, opts.interrupted) {
-                if progress {
-                    println!();
-                }
-                return Err(Interrupted.into());
+                // sleep_until only reports true once a signal is pending.
+                return interrupted(pending_signal(opts.interrupted).unwrap_or(SIGINT));
             }
             next_tick += Duration::from_secs(1);
         } else {
@@ -218,23 +253,22 @@ pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) 
     }
 
     if progress {
-        println!();
+        outln!();
     }
 
     // Audible/visual bell so completion is noticed even without a
     // notification daemon (headless, muted D-Bus, etc.). Gated on ANSI
     // so redirected output stays clean.
     if opts.ansi {
-        print!("\x07");
-        let _ = std::io::stdout().flush();
+        out!("\x07");
     }
 
-    println!("{}", opts.message);
+    outln!("{}", opts.message);
     // Nested rather than a let chain: let chains need Rust 1.88, and the
     // crate's MSRV is 1.85.
     if !opts.no_notify {
         if let Err(e) = crate::notify::notify(opts.message) {
-            eprintln!("warning: {e:#}");
+            let _ = writeln!(std::io::stderr(), "warning: {e:#}");
         }
     }
     Ok(())
@@ -264,6 +298,16 @@ mod tests {
     }
 
     #[test]
+    fn terminal_title_is_saved_and_restored() {
+        assert!(TERMINAL_ENTER.contains("\x1b[22;0t"));
+        // Clear first, then pop: terminals without a title stack still end
+        // up with an empty title rather than the last countdown.
+        let clear = TERMINAL_EXIT.find("\x1b]0;\x07").unwrap();
+        let pop = TERMINAL_EXIT.find("\x1b[23;0t").unwrap();
+        assert!(clear < pop);
+    }
+
+    #[test]
     fn resyncs_stale_deadline_instead_of_catching_up() {
         let stale = Duration::from_secs(5); // far behind
         let now = Duration::from_secs(120);
@@ -288,13 +332,13 @@ mod tests {
 
     #[test]
     fn sleep_notices_interrupt_quickly() {
-        let flag = AtomicBool::new(false);
+        let flag = InterruptFlag::new(0);
         let deadline = RealClock.now() + Duration::from_secs(30);
         // Simulate Ctrl+C arriving mid-sleep from another thread.
         std::thread::scope(|s| {
             s.spawn(|| {
                 std::thread::sleep(Duration::from_millis(100));
-                flag.store(true, Ordering::Relaxed);
+                flag.store(SIGINT as usize, Ordering::Relaxed);
             });
             let t0 = std::time::Instant::now();
             assert!(RealClock.sleep_until(deadline, &flag));
@@ -305,7 +349,7 @@ mod tests {
 
     #[test]
     fn run_returns_interrupted_error() {
-        let flag = AtomicBool::new(true); // already interrupted
+        let flag = InterruptFlag::new(SIGINT as usize); // already interrupted
         let opts = RunOptions {
             message: "done",
             label: "🍅 tomato",
@@ -315,11 +359,28 @@ mod tests {
             interrupted: &flag,
         };
         let err = run(25, &opts).unwrap_err();
-        assert!(err.downcast_ref::<Interrupted>().is_some());
+        assert_eq!(err.downcast_ref::<Interrupted>(), Some(&Interrupted { signal: SIGINT }));
     }
 
     /// Virtual clock: `now` advances only when `sleep_until` is called, so a
     /// whole session finishes without real waiting.
+    const SIGTERM: usize = 15;
+
+    #[test]
+    fn exit_code_is_128_plus_signal() {
+        assert_eq!(Interrupted { signal: 2 }.exit_code(), 130);
+        assert_eq!(Interrupted { signal: 15 }.exit_code(), 143);
+        assert_eq!(Interrupted { signal: 1 }.exit_code(), 129);
+    }
+
+    #[test]
+    fn pending_signal_reads_flag() {
+        let flag = InterruptFlag::new(0);
+        assert_eq!(pending_signal(&flag), None);
+        flag.store(15, Ordering::Relaxed);
+        assert_eq!(pending_signal(&flag), Some(15));
+    }
+
     struct FakeClock {
         now: Cell<Duration>,
         interrupt_after: Option<usize>,
@@ -345,12 +406,12 @@ mod tests {
             self.now.get()
         }
 
-        fn sleep_until(&self, deadline: Duration, interrupted: &AtomicBool) -> bool {
+        fn sleep_until(&self, deadline: Duration, interrupted: &InterruptFlag) -> bool {
             self.sleeps.set(self.sleeps.get() + 1);
             if self.interrupt_after == Some(self.sleeps.get()) {
-                interrupted.store(true, Ordering::Relaxed);
+                interrupted.store(SIGTERM, Ordering::Relaxed);
             }
-            if interrupted.load(Ordering::Relaxed) {
+            if pending_signal(interrupted).is_some() {
                 return true;
             }
             let overshoot = match self.suspend_at {
@@ -362,7 +423,7 @@ mod tests {
         }
     }
 
-    fn quiet_opts(interrupted: &AtomicBool) -> RunOptions<'_> {
+    fn quiet_opts(interrupted: &InterruptFlag) -> RunOptions<'_> {
         RunOptions {
             message: "done",
             label: "🍅 tomato",
@@ -376,7 +437,7 @@ mod tests {
     #[test]
     fn fake_clock_completes_full_countdown() {
         let clock = FakeClock::new();
-        let flag = AtomicBool::new(false);
+        let flag = InterruptFlag::new(0);
         run_with_clock(1, &quiet_opts(&flag), &clock).unwrap();
         assert_eq!(clock.sleeps.get(), 60);
     }
@@ -385,9 +446,14 @@ mod tests {
     fn fake_clock_interrupts_mid_run() {
         let mut clock = FakeClock::new();
         clock.interrupt_after = Some(3);
-        let flag = AtomicBool::new(false);
+        let flag = InterruptFlag::new(0);
         let err = run_with_clock(1, &quiet_opts(&flag), &clock).unwrap_err();
-        assert!(err.downcast_ref::<Interrupted>().is_some());
+        // The signal number survives to the error so main can pick the
+        // exit code.
+        assert_eq!(
+            err.downcast_ref::<Interrupted>(),
+            Some(&Interrupted { signal: SIGTERM as i32 })
+        );
         assert_eq!(clock.sleeps.get(), 3);
     }
 
@@ -397,7 +463,7 @@ mod tests {
         // should end at 60s of real time, not 60s of awake time.
         let mut clock = FakeClock::new();
         clock.suspend_at = Some((3, Duration::from_secs(50)));
-        let flag = AtomicBool::new(false);
+        let flag = InterruptFlag::new(0);
         run_with_clock(1, &quiet_opts(&flag), &clock).unwrap();
         assert_eq!(clock.now(), Duration::from_secs(60));
         // 3 sleeps to reach 53s, then a resync (no sleep), then 7 more.

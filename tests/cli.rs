@@ -105,5 +105,37 @@ fn sigterm_exits_gracefully() {
     assert!(kill.success());
 
     let status = child.wait().unwrap();
-    assert_eq!(status.code(), Some(130), "SIGTERM should exit 130 after cleanup");
+    assert_eq!(status.code(), Some(143), "SIGTERM should exit 128+15 after cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn sighup_with_closed_output_exits_cleanly() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as StdCommand, Stdio};
+
+    // Simulates the terminal window closing: stdout/stderr are gone (writes
+    // fail) and SIGHUP arrives. Writing the interrupt message used to panic
+    // (exit 101) instead of exiting via the signal path.
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_tomato"))
+        .args(["work", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut header = String::new();
+    stdout.read_line(&mut header).unwrap();
+    drop(stdout);
+    drop(child.stderr.take());
+
+    let kill = StdCommand::new("kill")
+        .args(["-HUP", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(129), "SIGHUP should exit 128+1 via the signal path");
 }

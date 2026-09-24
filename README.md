@@ -41,7 +41,9 @@ tomato --no-notify work 25   # skip desktop notification
 tomato --quiet break 5       # no progress bar
 
 # Short aliases: w/work, b/break, c/cycle (also full/pomodoro)
-# Ctrl+C, SIGTERM and SIGHUP abort with exit code 130 and restore the terminal.
+# Ctrl+C, SIGTERM and SIGHUP stop the timer and restore the terminal (cursor
+# and, on terminals that support it, the previous window title). The exit
+# code is 128 + the signal: 130 for Ctrl+C, 143 for SIGTERM, 129 for SIGHUP.
 ```
 
 ## Terminal Output

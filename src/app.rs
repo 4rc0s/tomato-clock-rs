@@ -1,26 +1,37 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use anyhow::Context;
 
 use crate::cli::{BREAK_MINUTES, Cli, Command, WORK_MINUTES};
-use crate::timer::{self, RunOptions};
+use crate::timer::{self, InterruptFlag, RunOptions};
 
-/// Install the SIGINT/SIGTERM/SIGHUP handler that flips `flag`.
+/// Install handlers for SIGINT, SIGTERM and SIGHUP that store the signal's
+/// number in `flag`, so the exit code can say which one stopped the timer.
 ///
-/// Best-effort: if a handler is already installed (e.g. repeated calls from
-/// tests) the error is ignored and default signal termination still applies.
-pub fn install_signal_handler(flag: &Arc<AtomicBool>) {
+/// Best-effort: if registration fails, the error is ignored and default
+/// signal termination still applies.
+#[cfg(unix)]
+pub fn install_signal_handler(flag: &Arc<InterruptFlag>) {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        let _ = signal_hook::flag::register_usize(signal, Arc::clone(flag), signal as usize);
+    }
+}
+
+/// Windows console events carry no signal number; all of them (Ctrl+C,
+/// Ctrl+Break, closing the console) are reported as SIGINT.
+#[cfg(not(unix))]
+pub fn install_signal_handler(flag: &Arc<InterruptFlag>) {
     let flag = Arc::clone(flag);
     let _ = ctrlc::set_handler(move || {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        flag.store(timer::SIGINT as usize, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
 /// Parse-independent entry point: dispatch `cli` to the chosen timer(s).
 pub fn run(cli: Cli) -> anyhow::Result<()> {
-    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupted = Arc::new(InterruptFlag::new(0));
     install_signal_handler(&interrupted);
 
     let no_notify = cli.no_notify;
@@ -32,7 +43,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             run_cycle(WORK_MINUTES, BREAK_MINUTES, no_notify, quiet, ansi, &interrupted)?;
         }
         Some(Command::Work { minutes }) => {
-            println!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
+            outln!("🍅 tomato {minutes} minutes. Ctrl+C to exit");
             run_timer(
                 minutes,
                 "🍅 tomato",
@@ -44,7 +55,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
         }
         Some(Command::Break { minutes }) => {
-            println!("🛀 break {minutes} minutes. Ctrl+C to exit");
+            outln!("🛀 break {minutes} minutes. Ctrl+C to exit");
             run_timer(
                 minutes,
                 "🛀 break",
@@ -72,9 +83,9 @@ fn run_cycle(
     no_notify: bool,
     quiet: bool,
     ansi: bool,
-    interrupted: &AtomicBool,
+    interrupted: &InterruptFlag,
 ) -> anyhow::Result<()> {
-    println!("🍅 tomato {work_minutes} minutes. Ctrl+C to exit");
+    outln!("🍅 tomato {work_minutes} minutes. Ctrl+C to exit");
     run_timer(
         work_minutes,
         "🍅 tomato",
@@ -84,7 +95,7 @@ fn run_cycle(
         ansi,
         interrupted,
     )?;
-    println!("🛀 break {break_minutes} minutes. Ctrl+C to exit");
+    outln!("🛀 break {break_minutes} minutes. Ctrl+C to exit");
     run_timer(
         break_minutes,
         "🛀 break",
@@ -104,7 +115,7 @@ fn run_timer(
     no_notify: bool,
     quiet: bool,
     ansi: bool,
-    interrupted: &AtomicBool,
+    interrupted: &InterruptFlag,
 ) -> anyhow::Result<()> {
     timer::run(
         minutes,
