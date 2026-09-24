@@ -51,6 +51,10 @@ tomato --quiet break 5       # no progress bar
 🍅🍅---------------------------------------------- [8%] 23:00 ⏰
 ```
 
+Sessions follow real time: if your laptop sleeps mid-session, the time
+asleep still counts, and the timer finishes as soon as it wakes if the
+session is already over.
+
 The live bar (and terminal title / bell) is only drawn when stdout is a
 terminal; `--quiet` suppresses the bar and title too, but a completion bell
 still rings on a terminal.

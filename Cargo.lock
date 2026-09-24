@@ -1054,6 +1054,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ctrlc",
+ "libc",
  "notify-rust",
  "predicates",
 ]
