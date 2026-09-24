@@ -2,6 +2,7 @@
 name = "tomato"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
 description = "🍅 Tomato Clock — a straightforward command-line Pomodoro timer"
 license = "MIT"
 repository = "https://github.com/4rc0s/tomato-clock-rs"

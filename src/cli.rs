@@ -4,15 +4,20 @@ pub const WORK_MINUTES: u64 = 25;
 pub const BREAK_MINUTES: u64 = 5;
 pub const MAX_MINUTES: u64 = 1440;
 
-fn parse_minutes(s: &str) -> Result<u64, String> {
-    let minutes: u64 = s
-        .parse()
-        .map_err(|_| format!("`{s}` isn't a valid number of minutes"))?;
+/// Range check shared by clap parsing and the timer.
+pub fn validate_minutes(minutes: u64) -> Result<u64, String> {
     if (1..=MAX_MINUTES).contains(&minutes) {
         Ok(minutes)
     } else {
         Err(format!("minutes must be in range 1..={MAX_MINUTES}"))
     }
+}
+
+fn parse_minutes(s: &str) -> Result<u64, String> {
+    let minutes: u64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` isn't a valid number of minutes"))?;
+    validate_minutes(minutes)
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +90,14 @@ mod tests {
     #[test]
     fn rejects_non_numeric() {
         assert!(Cli::try_parse_from(["tomato", "work", "abc"]).is_err());
+    }
+
+    #[test]
+    fn validates_minutes_range() {
+        assert!(validate_minutes(0).is_err());
+        assert!(validate_minutes(1).is_ok());
+        assert!(validate_minutes(MAX_MINUTES).is_ok());
+        assert!(validate_minutes(MAX_MINUTES + 1).is_err());
     }
 
     #[test]

@@ -48,8 +48,11 @@ tomato --quiet break 5       # no progress bar
 
 ```sh
 🍅 tomato 25 minutes. Ctrl+C to exit
- 🍅🍅---------------------------------------------- [8%] 23:04 ⏰
+🍅🍅---------------------------------------------- [8%] 23:00 ⏰
 ```
+
+The live bar (and terminal title / bell) is only drawn when stdout is a
+terminal; `--quiet` suppresses it too.
 
 ## Desktop Notification
 

@@ -3,9 +3,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::anyhow;
-
-use crate::cli::MAX_MINUTES;
+use crate::cli::validate_minutes;
 use crate::progress::{bar_width, format_countdown, render_bar, session_title};
 
 /// Returned when the user hits Ctrl+C. `main` maps this to exit code 130
@@ -27,6 +25,9 @@ pub struct RunOptions<'a> {
     pub label: &'a str,
     pub no_notify: bool,
     pub quiet: bool,
+    /// Whether ANSI/OSC escape sequences may be written (auto-detected
+    /// from stdout being a TTY; `--quiet` still suppresses the bar).
+    pub ansi: bool,
     pub interrupted: &'a AtomicBool,
 }
 
@@ -36,12 +37,10 @@ pub fn seconds_left(total_secs: u64, elapsed_secs: u64) -> u64 {
     total_secs.saturating_sub(elapsed_secs)
 }
 
-pub fn validate_minutes(minutes: u64) -> anyhow::Result<u64> {
-    if (1..=MAX_MINUTES).contains(&minutes) {
-        Ok(minutes)
-    } else {
-        Err(anyhow!("minutes must be in range 1..={MAX_MINUTES}"))
-    }
+/// Whether the live progress bar / title / cursor hiding should render.
+/// Requires both a TTY (no escape codes into pipes/logs) and not `--quiet`.
+pub fn show_progress(quiet: bool, ansi: bool) -> bool {
+    !quiet && ansi
 }
 
 /// Compute the next tick deadline, resyncing when we have fallen behind
@@ -68,14 +67,14 @@ pub fn interruptible_sleep(deadline: Instant, interrupted: &AtomicBool) -> bool 
     interrupted.load(Ordering::Relaxed)
 }
 
-/// Hides the cursor while the progress bar is live, restoring it on drop
-/// (normal exit, interrupt, or panic). No-op when `active` is false
-/// (i.e. `--quiet`).
-struct CursorGuard {
+/// Hides the cursor while the progress bar is live, restoring the cursor
+/// and clearing the terminal title on drop (normal exit, interrupt, or
+/// panic). No-op when `active` is false (i.e. non-TTY or `--quiet`).
+struct TerminalGuard {
     active: bool,
 }
 
-impl CursorGuard {
+impl TerminalGuard {
     fn hide(active: bool) -> Self {
         if active {
             print!("\x1b[?25l");
@@ -85,10 +84,11 @@ impl CursorGuard {
     }
 }
 
-impl Drop for CursorGuard {
+impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if self.active {
-            print!("\x1b[?25h");
+            // Show cursor again and clear the OSC 0 title we kept overwriting.
+            print!("\x1b[?25h\x1b]0;\x07");
             let _ = std::io::stdout().flush();
         }
     }
@@ -101,18 +101,19 @@ fn set_terminal_title(title: &str) {
 
 /// Run a single countdown timer with a tick-accurate loop.
 pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
-    let minutes = validate_minutes(minutes)?;
+    let minutes = validate_minutes(minutes).map_err(|e| anyhow::anyhow!(e))?;
     let total_secs = minutes * 60;
     let width = bar_width(minutes);
+    let progress = show_progress(opts.quiet, opts.ansi);
 
-    let _cursor = CursorGuard::hide(!opts.quiet);
+    let _terminal = TerminalGuard::hide(progress);
 
     let start = Instant::now();
     let mut next_tick = start + Duration::from_secs(1);
 
     loop {
         if opts.interrupted.load(Ordering::Relaxed) {
-            if !opts.quiet {
+            if progress {
                 println!();
             }
             return Err(Interrupted.into());
@@ -122,7 +123,7 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
         let left_secs = seconds_left(total_secs, elapsed_secs);
         let countdown = format_countdown(left_secs);
 
-        if !opts.quiet {
+        if progress {
             // Pad with spaces to clear leftover chars when the line shrinks
             // (e.g. "10:00" -> "9:59").
             let line = render_bar(elapsed_secs, total_secs, width, &countdown);
@@ -142,7 +143,7 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
         let now = Instant::now();
         if now < next_tick {
             if interruptible_sleep(next_tick, opts.interrupted) {
-                if !opts.quiet {
+                if progress {
                     println!();
                 }
                 return Err(Interrupted.into());
@@ -153,14 +154,17 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
         }
     }
 
-    if !opts.quiet {
+    if progress {
         println!();
     }
 
     // Audible/visual bell so completion is noticed even without a
-    // notification daemon (headless, muted D-Bus, etc.).
-    print!("\x07");
-    let _ = std::io::stdout().flush();
+    // notification daemon (headless, muted D-Bus, etc.). Gated on ANSI
+    // so redirected output stays clean.
+    if opts.ansi {
+        print!("\x07");
+        let _ = std::io::stdout().flush();
+    }
 
     println!("{}", opts.message);
     if !opts.no_notify
@@ -185,11 +189,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_minutes() {
-        assert!(validate_minutes(0).is_err());
-        assert!(validate_minutes(1).is_ok());
-        assert!(validate_minutes(MAX_MINUTES).is_ok());
-        assert!(validate_minutes(MAX_MINUTES + 1).is_err());
+    fn show_progress_requires_tty_and_not_quiet() {
+        assert!(show_progress(false, true));
+        assert!(!show_progress(false, false)); // piped output: no escapes
+        assert!(!show_progress(true, true)); // --quiet overrides
+        assert!(!show_progress(true, false));
     }
 
     #[test]
@@ -235,6 +239,7 @@ mod tests {
             label: "🍅 tomato",
             no_notify: true,
             quiet: true,
+            ansi: false,
             interrupted: &flag,
         };
         let err = run(25, &opts).unwrap_err();
