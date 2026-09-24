@@ -195,10 +195,12 @@ pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) 
     }
 
     println!("{}", opts.message);
-    if !opts.no_notify
-        && let Err(e) = crate::notify::notify(opts.message)
-    {
-        eprintln!("warning: {e:#}");
+    // Nested rather than a let chain: let chains need Rust 1.88, and the
+    // crate's MSRV is 1.85.
+    if !opts.no_notify {
+        if let Err(e) = crate::notify::notify(opts.message) {
+            eprintln!("warning: {e:#}");
+        }
     }
     Ok(())
 }

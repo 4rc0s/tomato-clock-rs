@@ -80,18 +80,24 @@ fn non_tty_output_has_no_escape_codes() {
 #[cfg(unix)]
 #[test]
 fn sigterm_exits_gracefully() {
+    use std::io::{BufRead, BufReader};
     use std::process::{Command as StdCommand, Stdio};
-    use std::time::Duration;
 
     let mut child = StdCommand::new(env!("CARGO_BIN_EXE_tomato"))
         .args(["work", "1"])
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
 
-    // Give the child time to install its signal handler.
-    std::thread::sleep(Duration::from_millis(200));
+    // The header is printed after the signal handler is installed, so once
+    // it arrives SIGTERM is guaranteed to hit the handler rather than kill
+    // the process outright (a fixed sleep raced on loaded CI runners).
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut header = String::new();
+    stdout.read_line(&mut header).unwrap();
+    assert!(header.contains("tomato 1 minutes"), "unexpected header: {header:?}");
+
     let kill = StdCommand::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()

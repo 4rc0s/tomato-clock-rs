@@ -8,9 +8,13 @@ pub fn fraction(curr_secs: u64, total_secs: u64) -> f64 {
     (curr_secs.min(total_secs) as f64) / (total_secs as f64)
 }
 
-/// Rounded percentage of the timer that has elapsed, `0..=100`.
+/// Percentage of the timer that has elapsed, `0..=100`, rounded down so it
+/// only reads 100% once the countdown actually hits zero.
 pub fn percent(curr_secs: u64, total_secs: u64) -> u64 {
-    (fraction(curr_secs, total_secs) * 100.0).round() as u64
+    if total_secs == 0 {
+        return 100;
+    }
+    curr_secs.min(total_secs) * 100 / total_secs
 }
 
 /// Number of filled slots for a bar of `width` slots, derived from
@@ -91,6 +95,16 @@ mod tests {
             last_filled = filled;
         }
         assert_eq!(percent(total, total), 100);
+    }
+
+    #[test]
+    fn not_full_until_done() {
+        // Rounding used to show 100% with 7s still left on a 25-min timer.
+        assert_eq!(percent(1493, 1500), 99);
+        assert_eq!(percent(1499, 1500), 99);
+        assert!(filled_slots(1499, 1500, 25) < 25);
+        assert_eq!(percent(1500, 1500), 100);
+        assert_eq!(filled_slots(1500, 1500, 25), 25);
     }
 
     #[test]
