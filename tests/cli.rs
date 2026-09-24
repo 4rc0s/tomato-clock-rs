@@ -45,3 +45,59 @@ fn work_alias_parses() {
     let mut cmd = Command::cargo_bin("tomato").unwrap();
     cmd.args(["w", "--help"]).assert().success();
 }
+
+#[test]
+fn version_flag_succeeds() {
+    let mut cmd = Command::cargo_bin("tomato").unwrap();
+    cmd.arg("--version")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn cycle_aliases_parse() {
+    for alias in ["c", "full", "pomodoro"] {
+        let mut cmd = Command::cargo_bin("tomato").unwrap();
+        cmd.args([alias, "--help"]).assert().success();
+    }
+}
+
+#[test]
+fn non_tty_output_has_no_escape_codes() {
+    // stdout is a pipe here, so the bar/title/bell must be suppressed.
+    let mut cmd = Command::cargo_bin("tomato").unwrap();
+    let output = cmd
+        .args(["work", "1"])
+        .timeout(std::time::Duration::from_millis(300))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains('\x1b'), "unexpected escape codes: {stdout:?}");
+    assert!(!stdout.contains('\x07'), "unexpected bell: {stdout:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_exits_gracefully() {
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::Duration;
+
+    let mut child = StdCommand::new(env!("CARGO_BIN_EXE_tomato"))
+        .args(["work", "1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Give the child time to install its signal handler.
+    std::thread::sleep(Duration::from_millis(200));
+    let kill = StdCommand::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(130), "SIGTERM should exit 130 after cleanup");
+}

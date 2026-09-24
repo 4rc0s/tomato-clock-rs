@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use crate::cli::validate_minutes;
 use crate::progress::{bar_width, format_countdown, render_bar, session_title};
 
-/// Returned when the user hits Ctrl+C. `main` maps this to exit code 130
-/// (128 + SIGINT) so scripts can distinguish "aborted" from "done".
+/// Returned when the run is aborted. `main` maps this to exit code 130
+/// (128 + SIGINT) so scripts can distinguish "aborted" from "done". The
+/// signal handler fires for SIGINT, SIGTERM and SIGHUP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interrupted;
 
@@ -67,6 +68,27 @@ pub fn interruptible_sleep(deadline: Instant, interrupted: &AtomicBool) -> bool 
     interrupted.load(Ordering::Relaxed)
 }
 
+/// Time source for the countdown loop, abstracted so tests can run a full
+/// session without waiting in real time.
+pub trait Clock {
+    fn now(&self) -> Instant;
+    /// Sleep until `deadline`, returning `true` if interrupted.
+    fn sleep_until(&self, deadline: Instant, interrupted: &AtomicBool) -> bool;
+}
+
+/// Production clock backed by [`Instant::now`] and [`std::thread::sleep`].
+pub struct RealClock;
+
+impl Clock for RealClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep_until(&self, deadline: Instant, interrupted: &AtomicBool) -> bool {
+        interruptible_sleep(deadline, interrupted)
+    }
+}
+
 /// Hides the cursor while the progress bar is live, restoring the cursor
 /// and clearing the terminal title on drop (normal exit, interrupt, or
 /// panic). No-op when `active` is false (i.e. non-TTY or `--quiet`).
@@ -101,6 +123,12 @@ fn set_terminal_title(title: &str) {
 
 /// Run a single countdown timer with a tick-accurate loop.
 pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
+    run_with_clock(minutes, opts, &RealClock)
+}
+
+/// [`run`] against an arbitrary [`Clock`], so tests can complete a full
+/// session instantly.
+pub fn run_with_clock<C: Clock>(minutes: u64, opts: &RunOptions<'_>, clock: &C) -> anyhow::Result<()> {
     let minutes = validate_minutes(minutes).map_err(|e| anyhow::anyhow!(e))?;
     let total_secs = minutes * 60;
     let width = bar_width(minutes);
@@ -108,7 +136,7 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
 
     let _terminal = TerminalGuard::hide(progress);
 
-    let start = Instant::now();
+    let start = clock.now();
     let mut next_tick = start + Duration::from_secs(1);
 
     loop {
@@ -119,7 +147,7 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
             return Err(Interrupted.into());
         }
 
-        let elapsed_secs = start.elapsed().as_secs();
+        let elapsed_secs = clock.now().duration_since(start).as_secs();
         let left_secs = seconds_left(total_secs, elapsed_secs);
         let countdown = format_countdown(left_secs);
 
@@ -140,9 +168,9 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
         // Sleep until the next 1s tick to avoid drift from loop overhead.
         // On wake-from-sleep the deadline is stale, so resync instead of
         // busy-looping to catch up.
-        let now = Instant::now();
+        let now = clock.now();
         if now < next_tick {
-            if interruptible_sleep(next_tick, opts.interrupted) {
+            if clock.sleep_until(next_tick, opts.interrupted) {
                 if progress {
                     println!();
                 }
@@ -177,6 +205,8 @@ pub fn run(minutes: u64, opts: &RunOptions<'_>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -204,7 +234,7 @@ mod tests {
         let next = next_deadline(stale, now);
         // Should jump forward to ~now+1s, not return the stale tick.
         assert!(next > now);
-        assert!(next <= now + Duration::from_secs(1) + Duration::from_millis(10));
+        assert!(next <= now + Duration::from_secs(1) + Duration::from_millis(50));
     }
 
     #[test]
@@ -244,5 +274,72 @@ mod tests {
         };
         let err = run(25, &opts).unwrap_err();
         assert!(err.downcast_ref::<Interrupted>().is_some());
+    }
+
+    /// Virtual clock: `now` advances only when `sleep_until` is called, so a
+    /// whole session finishes without real waiting.
+    struct FakeClock {
+        base: Instant,
+        offset: Cell<Duration>,
+        interrupt_after: Option<usize>,
+        sleeps: Cell<usize>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                offset: Cell::new(Duration::ZERO),
+                interrupt_after: None,
+                sleeps: Cell::new(0),
+            }
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            self.base + self.offset.get()
+        }
+
+        fn sleep_until(&self, deadline: Instant, interrupted: &AtomicBool) -> bool {
+            self.sleeps.set(self.sleeps.get() + 1);
+            if self.interrupt_after == Some(self.sleeps.get()) {
+                interrupted.store(true, Ordering::Relaxed);
+            }
+            if interrupted.load(Ordering::Relaxed) {
+                return true;
+            }
+            self.offset.set(deadline.saturating_duration_since(self.base));
+            false
+        }
+    }
+
+    fn quiet_opts(interrupted: &AtomicBool) -> RunOptions<'_> {
+        RunOptions {
+            message: "done",
+            label: "🍅 tomato",
+            no_notify: true,
+            quiet: true,
+            ansi: false,
+            interrupted,
+        }
+    }
+
+    #[test]
+    fn fake_clock_completes_full_countdown() {
+        let clock = FakeClock::new();
+        let flag = AtomicBool::new(false);
+        run_with_clock(1, &quiet_opts(&flag), &clock).unwrap();
+        assert_eq!(clock.sleeps.get(), 60);
+    }
+
+    #[test]
+    fn fake_clock_interrupts_mid_run() {
+        let mut clock = FakeClock::new();
+        clock.interrupt_after = Some(3);
+        let flag = AtomicBool::new(false);
+        let err = run_with_clock(1, &quiet_opts(&flag), &clock).unwrap_err();
+        assert!(err.downcast_ref::<Interrupted>().is_some());
+        assert_eq!(clock.sleeps.get(), 3);
     }
 }

@@ -40,8 +40,8 @@ tomato --version      # version
 tomato --no-notify work 25   # skip desktop notification
 tomato --quiet break 5       # no progress bar
 
-# Short aliases: w/work, b/break, c/cycle
-# Ctrl+C aborts with exit code 130 (standard SIGINT).
+# Short aliases: w/work, b/break, c/cycle (also full/pomodoro)
+# Ctrl+C, SIGTERM and SIGHUP abort with exit code 130 and restore the terminal.
 ```
 
 ## Terminal Output
@@ -52,7 +52,8 @@ tomato --quiet break 5       # no progress bar
 ```
 
 The live bar (and terminal title / bell) is only drawn when stdout is a
-terminal; `--quiet` suppresses it too.
+terminal; `--quiet` suppresses the bar and title too, but a completion bell
+still rings on a terminal.
 
 ## Desktop Notification
 

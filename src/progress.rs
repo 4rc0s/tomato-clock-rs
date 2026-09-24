@@ -8,9 +8,16 @@ pub fn fraction(curr_secs: u64, total_secs: u64) -> f64 {
     (curr_secs.min(total_secs) as f64) / (total_secs as f64)
 }
 
-/// Number of filled slots for a bar of `width` slots.
+/// Rounded percentage of the timer that has elapsed, `0..=100`.
+pub fn percent(curr_secs: u64, total_secs: u64) -> u64 {
+    (fraction(curr_secs, total_secs) * 100.0).round() as u64
+}
+
+/// Number of filled slots for a bar of `width` slots, derived from
+/// [`percent`] so the label and the bar can never disagree (the bar is full
+/// exactly when the label reads 100%).
 pub fn filled_slots(curr_secs: u64, total_secs: u64, width: u64) -> u64 {
-    (fraction(curr_secs, total_secs) * width as f64).round() as u64
+    percent(curr_secs, total_secs) * width / 100
 }
 
 /// Bar width: one slot per minute, capped so long sessions stay readable.
@@ -40,7 +47,7 @@ pub fn render_bar(curr_secs: u64, total_secs: u64, width: u64, extra: &str) -> S
     for _ in 0..width.saturating_sub(filled) {
         out.push_str("--");
     }
-    out.push_str(&format!(" [{:.0}%]", fraction(curr_secs, total_secs) * 100.0));
+    out.push_str(&format!(" [{}%]", percent(curr_secs, total_secs)));
     out.push(' ');
     out.push_str(extra);
     out
@@ -66,6 +73,24 @@ mod tests {
     fn zero_total_does_not_panic() {
         assert_eq!(fraction(0, 0), 1.0);
         assert_eq!(filled_slots(0, 0, 10), 10);
+    }
+
+    #[test]
+    fn percent_and_bar_fill_agree() {
+        let (total, width) = (1500, 25);
+        let mut last_filled = 0;
+        for secs in (0..total).step_by(7).chain(std::iter::once(total)) {
+            let pct = percent(secs, total);
+            let filled = filled_slots(secs, total, width);
+            assert_eq!(
+                pct == 100,
+                filled == width,
+                "at {secs}s: {pct}% but {filled}/{width} slots"
+            );
+            assert!(filled >= last_filled, "fill went backwards at {secs}s");
+            last_filled = filled;
+        }
+        assert_eq!(percent(total, total), 100);
     }
 
     #[test]
